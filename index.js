@@ -1,3 +1,6 @@
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const crypto = require("crypto"); // Built-in Node tool to generate unique IDs
 require("dotenv").config();
 const express = require("express");
 const AWS = require("aws-sdk");
@@ -8,16 +11,25 @@ const FormData = require("form-data");
 const axios = require("axios");
 const fs = require("fs");
 const app = express();
+app.use(express.json());
 const port = process.env.PORT || 5000;
 
-// Enable CORS and JSON parsing
+// Enable CORS
 app.use(cors());
-app.use(express.json());
 
 // Set up file uploads temporarily on disk
 const upload = multer({ dest: "uploads/" });
 
-// AWS Configuration
+// ==========================================
+// AWS CONFIGURATION (SDK v2 & v3)
+// ==========================================
+const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "MedicalRecords";
+
+// --- SDK v3 Setup (For modern, modular routes) ---
+const v3Client = new DynamoDBClient({ region: process.env.AWS_REGION || "us-east-1" });
+const docClient = DynamoDBDocumentClient.from(v3Client);
+
+// --- SDK v2 Setup (For your existing legacy routes) ---
 const awsConfig = {
     region: process.env.AWS_REGION || "us-east-1",
 };
@@ -26,10 +38,11 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
     awsConfig.secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 }
 AWS.config.update(awsConfig);
+const dynamoDB = new AWS.DynamoDB.DocumentClient();
+const s3 = new AWS.S3();
 
 function getAwsConfig(req) {
     const isDoctor = req.headers["x-role"] === "doctor";
-
     return {
         region: process.env.AWS_REGION || "us-east-1",
         accessKeyId: isDoctor
@@ -40,11 +53,6 @@ function getAwsConfig(req) {
             : process.env.AWS_SECRET_ACCESS_KEY,
     };
 }
-
-// DynamoDB & S3 setup
-const dynamoDB = new AWS.DynamoDB.DocumentClient();
-const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "MedicalRecords";
-const s3 = new AWS.S3();
 
 // ==========
 // Middleware to get userSub
@@ -61,6 +69,49 @@ app.use(mockAuth);
 app.get("/", (req, res) => {
     res.json({ message: "Node.js Backend is Running! 🚀" });
 });
+
+
+// ==========================================
+// NEW ROUTE: Add Patient via Dashboard
+// ==========================================
+app.post("/api/patients", async (req, res) => {
+    try {
+        const { name, age, condition } = req.body;
+
+        // 1. Generate a unique ID for this new patient
+        const patientId = crypto.randomUUID();
+
+        // 2. Format the data to match your existing schema (Needs RecordID)
+        const newPatient = {
+            PatientID: patientId,
+            RecordID: "PROFILE", // Set to PROFILE to match your other routes
+            FullName: name,      // Mapped to FullName to match your schema
+            Age: age,
+            PrimaryCondition: condition,
+            CreatedAt: new Date().toISOString(),
+            activePrescriptions: [],
+            recentRecords: [],
+            xrayRecords: []
+        };
+
+        // 3. Create the SDK v3 PutCommand
+        const command = new PutCommand({
+            TableName: TABLE_NAME,
+            Item: newPatient,
+        });
+
+        // 4. Send to DynamoDB
+        await docClient.send(command);
+
+        console.log("SUCCESS! Patient saved to DynamoDB:", newPatient);
+        res.status(201).json({ message: "Patient successfully saved to database!", patient: newPatient });
+
+    } catch (error) {
+        console.error("Error saving patient to DynamoDB:", error);
+        res.status(500).json({ error: "Failed to save patient to database" });
+    }
+});
+
 
 // ==========
 // Get Profile
@@ -156,12 +207,17 @@ app.post("/upload-xray", upload.single("xray"), async (req, res) => {
     const params = {
         Bucket: process.env.S3_BUCKET_NAME,
         Key: filename,
-        Body: req.file.buffer, // Note: This uses memory buffering if configured
+        Body: fs.createReadStream(req.file.path), // Read from disk since you use multer without memory storage
         ContentType: req.file.mimetype,
     };
 
     try {
         const uploadResult = await s3.upload(params).promise();
+
+        // Clean up the temp file from disk
+        const unlinkAsync = promisify(fs.unlink);
+        await unlinkAsync(req.file.path);
+
         res.json({ message: "X-Ray uploaded successfully!", url: uploadResult.Location, fileName: filename, timestamp: timestamp });
     } catch (error) {
         res.status(500).json({ error: "Upload failed", details: error.message });
@@ -240,7 +296,7 @@ app.post("/analyze-xray", upload.single("file"), async (req, res) => {
         res.status(500).json({ error: "Failed to analyze the X-ray", details: error.message });
     } finally {
         const unlinkAsync = promisify(fs.unlink);
-        await unlinkAsync(file.path);
+        if (file && file.path) await unlinkAsync(file.path);
     }
 });
 
