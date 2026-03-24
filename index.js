@@ -1,6 +1,6 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
-const crypto = require("crypto"); // Built-in Node tool to generate unique IDs
+const crypto = require("crypto");
 require("dotenv").config();
 const express = require("express");
 const AWS = require("aws-sdk");
@@ -10,26 +10,33 @@ const { promisify } = require("util");
 const FormData = require("form-data");
 const axios = require("axios");
 const fs = require("fs");
+
 const app = express();
+
+// standard cors setup
+app.use(cors({
+    origin: ["http://localhost:5173", "http://127.0.0.1:5173"], 
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-role", "x-sub", "x-patient-id"]
+}));
+
+// parse json body
 app.use(express.json());
-const port = process.env.PORT || 5000;
 
-// Enable CORS
-app.use(cors());
+// changed from 5000 to 8080 to avoid mac airplay collision
+const port = process.env.PORT || 8080;
 
-// Set up file uploads temporarily on disk
+// setup temp file upload
 const upload = multer({ dest: "uploads/" });
 
-// ==========================================
-// AWS CONFIGURATION (SDK v2 & v3)
-// ==========================================
+// aws config
 const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "MedicalRecords";
 
-// --- SDK v3 Setup (For modern, modular routes) ---
+// sdk v3 setup
 const v3Client = new DynamoDBClient({ region: process.env.AWS_REGION || "us-east-1" });
 const docClient = DynamoDBDocumentClient.from(v3Client);
 
-// --- SDK v2 Setup (For your existing legacy routes) ---
+// sdk v2 setup
 const awsConfig = {
     region: process.env.AWS_REGION || "us-east-1",
 };
@@ -41,6 +48,7 @@ AWS.config.update(awsConfig);
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
+// get aws config based on role
 function getAwsConfig(req) {
     const isDoctor = req.headers["x-role"] === "doctor";
     return {
@@ -54,38 +62,31 @@ function getAwsConfig(req) {
     };
 }
 
-// ==========
-// Middleware to get userSub
-// ==========
+// strict mock auth middleware
 function mockAuth(req, res, next) {
     req.user = { sub: req.headers["x-sub"] || "demo-sub" };
     next();
 }
 app.use(mockAuth);
 
-// ==========
-// Health Check
-// ==========
+// health check
 app.get("/", (req, res) => {
     res.json({ message: "Node.js Backend is Running! 🚀" });
 });
 
-
-// ==========================================
-// NEW ROUTE: Add Patient via Dashboard
-// ==========================================
+// add patient via dashboard
 app.post("/api/patients", async (req, res) => {
     try {
         const { name, age, condition } = req.body;
 
-        // 1. Generate a unique ID for this new patient
+        // gen unique id
         const patientId = crypto.randomUUID();
 
-        // 2. Format the data to match your existing schema (Needs RecordID)
+        // format data schema
         const newPatient = {
             PatientID: patientId,
-            RecordID: "PROFILE", // Set to PROFILE to match your other routes
-            FullName: name,      // Mapped to FullName to match your schema
+            RecordID: "PROFILE",
+            FullName: name,
             Age: age,
             PrimaryCondition: condition,
             CreatedAt: new Date().toISOString(),
@@ -94,28 +95,25 @@ app.post("/api/patients", async (req, res) => {
             xrayRecords: []
         };
 
-        // 3. Create the SDK v3 PutCommand
+        // init put command
         const command = new PutCommand({
             TableName: TABLE_NAME,
             Item: newPatient,
         });
 
-        // 4. Send to DynamoDB
+        // send to db
         await docClient.send(command);
 
-        console.log("SUCCESS! Patient saved to DynamoDB:", newPatient);
-        res.status(201).json({ message: "Patient successfully saved to database!", patient: newPatient });
+        console.log("SUCCESS! Patient saved:", newPatient);
+        res.status(201).json({ message: "Patient saved!", patient: newPatient });
 
     } catch (error) {
-        console.error("Error saving patient to DynamoDB:", error);
-        res.status(500).json({ error: "Failed to save patient to database" });
+        console.error("Error saving patient:", error);
+        res.status(500).json({ error: "Failed to save patient" });
     }
 });
 
-
-// ==========
-// Get Profile
-// ==========
+// get profile
 app.get("/profile", async (req, res) => {
     const userSub = req.user.sub;
     const params = {
@@ -132,9 +130,7 @@ app.get("/profile", async (req, res) => {
     }
 });
 
-// ==========
-// Get All Medical Records
-// ==========
+// get all records
 app.get("/records", async (req, res) => {
     const userSub = req.user.sub;
     const params = {
@@ -151,9 +147,7 @@ app.get("/records", async (req, res) => {
     }
 });
 
-// ==========
-// Get a Single Record
-// ==========
+// get single record
 app.get("/records/:recordID", async (req, res) => {
     const userSub = req.user.sub;
     const { recordID } = req.params;
@@ -171,15 +165,13 @@ app.get("/records/:recordID", async (req, res) => {
     }
 });
 
-// ==========
-// Create a New Record
-// ==========
+// create new record
 app.post("/records", async (req, res) => {
     const userSub = req.user.sub;
     const { recordID, Diagnosis, Date } = req.body;
 
     if (!recordID || !Diagnosis || !Date) {
-        return res.status(400).json({ error: "Missing required fields" });
+        return res.status(400).json({ error: "Missing fields" });
     }
 
     const params = {
@@ -190,15 +182,13 @@ app.post("/records", async (req, res) => {
 
     try {
         await dynamoDB.put(params).promise();
-        res.json({ message: "Medical record created successfully!", data: params.Item });
+        res.json({ message: "Record created!", data: params.Item });
     } catch (error) {
         res.status(500).json({ error: "Error creating record", details: error.message });
     }
 });
 
-// ==========
-// Upload X-ray to S3
-// ==========
+// upload xray to s3
 app.post("/upload-xray", upload.single("xray"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
@@ -207,26 +197,24 @@ app.post("/upload-xray", upload.single("xray"), async (req, res) => {
     const params = {
         Bucket: process.env.S3_BUCKET_NAME,
         Key: filename,
-        Body: fs.createReadStream(req.file.path), // Read from disk since you use multer without memory storage
+        Body: fs.createReadStream(req.file.path),
         ContentType: req.file.mimetype,
     };
 
     try {
         const uploadResult = await s3.upload(params).promise();
-
-        // Clean up the temp file from disk
+        
+        // clean temp file
         const unlinkAsync = promisify(fs.unlink);
         await unlinkAsync(req.file.path);
-
-        res.json({ message: "X-Ray uploaded successfully!", url: uploadResult.Location, fileName: filename, timestamp: timestamp });
+        
+        res.json({ message: "X-Ray uploaded!", url: uploadResult.Location, fileName: filename, timestamp: timestamp });
     } catch (error) {
         res.status(500).json({ error: "Upload failed", details: error.message });
     }
 });
 
-// ==========
-// Delete a Record
-// ==========
+// delete record
 app.delete("/records/:recordID", async (req, res) => {
     const userSub = req.user.sub;
     const { recordID } = req.params;
@@ -234,15 +222,13 @@ app.delete("/records/:recordID", async (req, res) => {
 
     try {
         await dynamoDB.delete(params).promise();
-        res.json({ message: "Medical record deleted successfully" });
+        res.json({ message: "Record deleted" });
     } catch (error) {
         res.status(500).json({ error: "Error deleting record", details: error.message });
     }
 });
 
-// ==========
-// Get Active Prescriptions
-// ==========
+// get active prescriptions
 app.get("/prescriptions", async (req, res) => {
     const userSub = req.user.sub;
     const params = {
@@ -259,9 +245,7 @@ app.get("/prescriptions", async (req, res) => {
     }
 });
 
-// ==========
-// Store X-Ray Prediction in DynamoDB
-// ==========
+// store xray prediction
 app.post("/analyze-xray", upload.single("file"), async (req, res) => {
     const file = req.file;
     const userSub = req.headers["x-sub"];
@@ -293,27 +277,24 @@ app.post("/analyze-xray", upload.single("file"), async (req, res) => {
         res.json({ prediction, formattedTimestamp });
 
     } catch (error) {
-        res.status(500).json({ error: "Failed to analyze the X-ray", details: error.message });
+        res.status(500).json({ error: "Failed to analyze X-ray", details: error.message });
     } finally {
+        // cleanup
         const unlinkAsync = promisify(fs.unlink);
         if (file && file.path) await unlinkAsync(file.path);
     }
 });
 
-// ====================
-// Doctor Routes Middleware
-// ====================
+// strict require doctor role middleware
 function requireDoctor(req, res, next) {
     if (req.headers["x-role"] === "doctor") {
         req.user.role = "doctor";
         return next();
     }
-    return res.status(403).json({ error: "Access denied: Doctor role required" });
+    return res.status(403).json({ error: "Access denied" });
 }
 
-// ====================
-// Get Aggregated Patient Data (Doctor Dashboard)
-// ====================
+// get aggregated patient data
 app.get("/all-aggregated", requireDoctor, async (req, res) => {
     const params = { TableName: TABLE_NAME };
 
@@ -324,18 +305,20 @@ app.get("/all-aggregated", requireDoctor, async (req, res) => {
 
         items.forEach((item) => {
             const pid = item.PatientID;
-            if (item.RecordID === "PROFILE" && (!item.Username || item.Username === "N/A")) return;
 
+            // init scaffold if missing
             if (!aggregated[pid]) {
                 aggregated[pid] = { PatientID: pid, profile: null, activePrescriptions: [], recentRecords: [], xrayRecords: [] };
             }
 
+            // map records
             if (item.RecordID === "PROFILE") aggregated[pid].profile = item;
             else if (item.RecordID.startsWith("PRE#")) aggregated[pid].activePrescriptions.push(item);
             else if (item.RecordID.startsWith("REC#")) aggregated[pid].recentRecords.push(item);
             else if (item.RecordID.startsWith("XRAY#")) aggregated[pid].xrayRecords.push(item);
         });
 
+        // filter valid profiles
         const result = Object.values(aggregated).filter((patient) => patient.profile !== null);
         res.json(result);
     } catch (error) {
@@ -343,9 +326,7 @@ app.get("/all-aggregated", requireDoctor, async (req, res) => {
     }
 });
 
-// ====================
-// Doctor Management Routes 
-// ====================
+// add patient doctor route
 app.post("/add-patient", requireDoctor, async (req, res) => {
     const { PatientID, name, age, bloodType, weight } = req.body;
     if (!PatientID || !name || !age || !bloodType || !weight) return res.status(400).json({ error: "Missing fields" });
@@ -354,16 +335,17 @@ app.post("/add-patient", requireDoctor, async (req, res) => {
 
     try {
         const existing = await dynamoDB.get(paramsCheck).promise();
-        if (existing.Item) return res.status(409).json({ error: "Patient already exists" });
+        if (existing.Item) return res.status(409).json({ error: "Patient exists" });
 
         const paramsPut = { TableName: TABLE_NAME, Item: { PatientID, RecordID: "PROFILE", name, age, bloodType, weight } };
         await dynamoDB.put(paramsPut).promise();
-        res.json({ message: "Patient added successfully", patient: paramsPut.Item });
+        res.json({ message: "Patient added", patient: paramsPut.Item });
     } catch (error) {
         res.status(500).json({ error: "Error adding patient", details: error.message });
     }
 });
 
+// update patient doctor route
 app.put("/update-patient", requireDoctor, async (req, res) => {
     const { PatientID, FullName, Age, BloodType, Weight, Username, activePrescriptions, recentRecords, xrayRecords } = req.body;
 
@@ -380,24 +362,26 @@ app.put("/update-patient", requireDoctor, async (req, res) => {
 
     try {
         await dynamoDB.put(params).promise();
-        res.json({ message: "Patient updated successfully", patient: item });
+        res.json({ message: "Patient updated", patient: item });
     } catch (error) {
         res.status(500).json({ error: "Error updating patient", details: error.message });
     }
 });
 
+// delete patient doctor route
 app.delete("/delete-patient/:PatientID", requireDoctor, async (req, res) => {
     const { PatientID } = req.params;
     const params = { TableName: TABLE_NAME, Key: { PatientID, RecordID: "PROFILE" } };
 
     try {
         await dynamoDB.delete(params).promise();
-        res.json({ message: "Patient profile deleted successfully" });
+        res.json({ message: "Patient deleted" });
     } catch (error) {
         res.status(500).json({ error: "Error deleting patient", details: error.message });
     }
 });
 
+// add prescription doctor route
 app.post("/add-prescription", requireDoctor, async (req, res) => {
     const { PatientID, Name, Dosage } = req.body;
     if (!PatientID || !Name || !Dosage) return res.status(400).json({ error: "Missing fields" });
@@ -407,12 +391,13 @@ app.post("/add-prescription", requireDoctor, async (req, res) => {
 
     try {
         await dynamoDB.put(params).promise();
-        res.json({ message: "Prescription added successfully", prescription: params.Item });
+        res.json({ message: "Prescription added", prescription: params.Item });
     } catch (error) {
         res.status(500).json({ error: "Error adding prescription", details: error.message });
     }
 });
 
+// add record doctor route
 app.post("/add-record", requireDoctor, async (req, res) => {
     const { PatientID, Diagnosis, Date } = req.body;
     if (!PatientID || !Diagnosis || !Date) return res.status(400).json({ error: "Missing fields" });
@@ -421,30 +406,29 @@ app.post("/add-record", requireDoctor, async (req, res) => {
 
     try {
         await dynamoDB.put(params).promise();
-        res.json({ message: "Record added successfully", record: params.Item });
+        res.json({ message: "Record added", record: params.Item });
     } catch (error) {
         res.status(500).json({ error: "Error adding record", details: error.message });
     }
 });
 
+// delete item doctor route
 app.delete("/delete-item/:recordID", requireDoctor, async (req, res) => {
     const { recordID } = req.params;
     const patientID = req.query["x-patient-id"];
-    if (!patientID) return res.status(400).json({ error: "Missing patient ID" });
+    if (!patientID) return res.status(400).json({ error: "Missing ID" });
 
     const params = { TableName: TABLE_NAME, Key: { PatientID: patientID, RecordID: recordID } };
 
     try {
         await dynamoDB.delete(params).promise();
-        res.json({ message: `Item ${recordID} deleted successfully` });
+        res.json({ message: `Item deleted` });
     } catch (error) {
         res.status(500).json({ error: "Failed to delete item", details: error.message });
     }
 });
 
-// ====================
-// Patient Creation via Cognito (Doctor access)
-// ====================
+// create patient via cognito doctor route
 app.post("/create-patient", requireDoctor, async (req, res) => {
     const { FullName, Age, BloodType, Weight, Email, Username } = req.body;
 
@@ -471,15 +455,16 @@ app.post("/create-patient", requireDoctor, async (req, res) => {
         };
 
         await dynamoDbDoctor.put(dbParams).promise();
-        res.json({ message: "Patient created successfully", patient: dbParams.Item, cognitoUser: cognitoResponse.User });
+        res.json({ message: "Patient created", patient: dbParams.Item, cognitoUser: cognitoResponse.User });
     } catch (error) {
         res.status(500).json({ error: "Error creating patient", details: error.message });
     }
 });
 
+// search patient doctor route
 app.get("/search-patient", requireDoctor, async (req, res) => {
     const { username } = req.query;
-    if (!username) return res.status(400).json({ error: "Missing 'username'" });
+    if (!username) return res.status(400).json({ error: "Missing username" });
 
     const params = {
         TableName: TABLE_NAME,
@@ -490,19 +475,19 @@ app.get("/search-patient", requireDoctor, async (req, res) => {
 
     try {
         const result = await dynamoDB.query(params).promise();
-        if (!result.Items || result.Items.length === 0) return res.status(404).json({ error: "Patient not found" });
+        if (!result.Items || result.Items.length === 0) return res.status(404).json({ error: "Not found" });
         res.json(result.Items);
     } catch (error) {
         res.status(500).json({ error: "Error searching patient", details: error.message });
     }
 });
 
-// Start Server
+// start server
 const server = app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
 });
 
-// Catch sneaky background errors
+// handle crash
 server.on("error", (error) => {
-    console.error("Server crashed with error:", error);
+    console.error("Server crashed:", error);
 });
