@@ -15,7 +15,7 @@ const app = express();
 
 // standard cors setup
 app.use(cors({
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"], 
+    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "x-role", "x-sub", "x-patient-id"]
 }));
@@ -77,38 +77,25 @@ app.get("/", (req, res) => {
 // add patient via dashboard
 app.post("/api/patients", async (req, res) => {
     try {
-        const { name, age, condition } = req.body;
-
-        // gen unique id
+        const { name, age, condition, bloodType, weight } = req.body;
         const patientId = crypto.randomUUID();
 
-        // format data schema
         const newPatient = {
             PatientID: patientId,
             RecordID: "PROFILE",
             FullName: name,
             Age: age,
             PrimaryCondition: condition,
-            CreatedAt: new Date().toISOString(),
-            activePrescriptions: [],
-            recentRecords: [],
-            xrayRecords: []
+            BloodType: bloodType || "N/A", // added
+            Weight: weight || "N/A",       // added
+            CreatedAt: new Date().toISOString()
         };
 
-        // init put command
-        const command = new PutCommand({
-            TableName: TABLE_NAME,
-            Item: newPatient,
-        });
-
-        // send to db
+        const command = new PutCommand({ TableName: TABLE_NAME, Item: newPatient });
         await docClient.send(command);
 
-        console.log("SUCCESS! Patient saved:", newPatient);
         res.status(201).json({ message: "Patient saved!", patient: newPatient });
-
     } catch (error) {
-        console.error("Error saving patient:", error);
         res.status(500).json({ error: "Failed to save patient" });
     }
 });
@@ -203,11 +190,11 @@ app.post("/upload-xray", upload.single("xray"), async (req, res) => {
 
     try {
         const uploadResult = await s3.upload(params).promise();
-        
+
         // clean temp file
         const unlinkAsync = promisify(fs.unlink);
         await unlinkAsync(req.file.path);
-        
+
         res.json({ message: "X-Ray uploaded!", url: uploadResult.Location, fileName: filename, timestamp: timestamp });
     } catch (error) {
         res.status(500).json({ error: "Upload failed", details: error.message });
@@ -347,21 +334,25 @@ app.post("/add-patient", requireDoctor, async (req, res) => {
 
 // update patient doctor route
 app.put("/update-patient", requireDoctor, async (req, res) => {
-    const { PatientID, FullName, Age, BloodType, Weight, Username, activePrescriptions, recentRecords, xrayRecords } = req.body;
+    const { PatientID, FullName, Age, BloodType, Weight, PrimaryCondition } = req.body;
 
-    if (!PatientID || !FullName || !Age || !BloodType || !Weight || !Username) return res.status(400).json({ error: "Missing fields" });
+    // only require the essentials
+    if (!PatientID || !FullName) return res.status(400).json({ error: "Missing ID or Name" });
 
+    // because of your smart NoSQL schema, this only updates the PROFILE record
+    // it will NOT overwrite or delete their separate prescriptions or x-rays!
     const item = {
-        PatientID, RecordID: "PROFILE", FullName, Age, BloodType, Weight, Username,
-        activePrescriptions: Array.isArray(activePrescriptions) ? activePrescriptions : [],
-        recentRecords: Array.isArray(recentRecords) ? recentRecords : [],
-        xrayRecords: Array.isArray(xrayRecords) ? xrayRecords : []
+        PatientID,
+        RecordID: "PROFILE",
+        FullName,
+        Age,
+        BloodType,
+        Weight,
+        PrimaryCondition
     };
 
-    const params = { TableName: TABLE_NAME, Item: item };
-
     try {
-        await dynamoDB.put(params).promise();
+        await dynamoDB.put({ TableName: TABLE_NAME, Item: item }).promise();
         res.json({ message: "Patient updated", patient: item });
     } catch (error) {
         res.status(500).json({ error: "Error updating patient", details: error.message });
